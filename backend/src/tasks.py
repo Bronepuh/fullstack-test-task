@@ -1,25 +1,18 @@
 import asyncio
-import os
 from pathlib import Path
+
 from celery import Celery
-from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
-from src.models import Alert, StoredFile
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.pool import NullPool
+
 from src.core.config import settings
+from src.models import Alert, StoredFile
 
-REDIS_URL = os.environ.get("REDIS_URL", "redis://backend-redis:6379/0")
-_worker_loop: asyncio.AbstractEventLoop | None = None
+celery_app = Celery("file_tasks", broker=settings.REDIS_URL, backend=settings.REDIS_URL)
 
-
-def run_in_worker_loop(coroutine):
-    global _worker_loop
-    if _worker_loop is None or _worker_loop.is_closed():
-        _worker_loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(_worker_loop)
-    return _worker_loop.run_until_complete(coroutine)
-
-
-celery_app = Celery("file_tasks", broker=REDIS_URL, backend=REDIS_URL)
-engine = create_async_engine(settings.DB_URL)
+# NullPool отключает кэширование соединений, 
+# что спасает от ошибки "attached to a different loop" при запуске новых asyncio.run()
+engine = create_async_engine(settings.DB_URL, poolclass=NullPool)
 async_session_maker = async_sessionmaker(engine, expire_on_commit=False)
 
 
@@ -71,13 +64,23 @@ async def _extract_file_metadata(file_id: str) -> None:
             "mime_type": file_item.mime_type,
         }
 
+        # Оптимизация памяти: потоковое чтение вместо загрузки файла целиком
         if file_item.mime_type.startswith("text/"):
-            content = stored_path.read_text(encoding="utf-8", errors="ignore")
-            metadata["line_count"] = len(content.splitlines())
-            metadata["char_count"] = len(content)
+            line_count = 0
+            char_count = 0
+            with open(stored_path, "r", encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    line_count += 1
+                    char_count += len(line)
+            metadata["line_count"] = line_count
+            metadata["char_count"] = char_count
+            
         elif file_item.mime_type == "application/pdf":
-            content = stored_path.read_bytes()
-            metadata["approx_page_count"] = max(content.count(b"/Type /Page"), 1)
+            page_count = 0
+            with open(stored_path, "rb") as f:
+                while chunk := f.read(1024 * 1024):  # Читаем чанками по 1 МБ
+                    page_count += chunk.count(b"/Type /Page")
+            metadata["approx_page_count"] = max(page_count, 1)
 
         file_item.metadata_json = metadata
         file_item.processing_status = "processed"
@@ -109,14 +112,14 @@ async def _send_file_alert(file_id: str) -> None:
 
 @celery_app.task
 def scan_file_for_threats(file_id: str) -> None:
-    run_in_worker_loop(_scan_file_for_threats(file_id))
+    asyncio.run(_scan_file_for_threats(file_id))
 
 
 @celery_app.task
 def extract_file_metadata(file_id: str) -> None:
-    run_in_worker_loop(_extract_file_metadata(file_id))
+    asyncio.run(_extract_file_metadata(file_id))
 
 
 @celery_app.task
 def send_file_alert(file_id: str) -> None:
-    run_in_worker_loop(_send_file_alert(file_id))
+    asyncio.run(_send_file_alert(file_id))

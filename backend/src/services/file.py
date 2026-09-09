@@ -1,13 +1,22 @@
 import mimetypes
+import os
+import shutil
 from pathlib import Path
 from uuid import uuid4
 
 from fastapi import HTTPException, UploadFile, status
+from starlette.concurrency import run_in_threadpool
 
 from src.core.config import settings
 from src.models import StoredFile
 from src.repositories.file import FileRepository
 from src.tasks import scan_file_for_threats
+
+
+def _save_file_to_disk(upload_file: UploadFile, dest_path: Path) -> None:
+    """Синхронная функция для сохранения файла, вызывается в пуле потоков"""
+    with open(dest_path, "wb") as buffer:
+        shutil.copyfileobj(upload_file.file, buffer)
 
 
 class FileService:
@@ -27,21 +36,21 @@ class FileService:
         return file_item
 
     async def create_file(self, title: str, upload_file: UploadFile) -> StoredFile:
-        # TODO: (Спринт 2) Переписать чтение в память на асинхронную потоковую запись (chunking)
-        content = await upload_file.read()
-        if not content:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST, 
-                detail="File is empty"
-            )
-
         file_id = str(uuid4())
         suffix = Path(upload_file.filename or "").suffix
         stored_name = f"{file_id}{suffix}"
         stored_path = settings.STORAGE_DIR / stored_name
-        
-        # Сохранение на диск
-        stored_path.write_bytes(content)
+
+        # Потоковое сохранение на диск без загрузки файла целиком в ОЗУ
+        await run_in_threadpool(_save_file_to_disk, upload_file, stored_path)
+
+        file_size = os.path.getsize(stored_path)
+        if file_size == 0:
+            stored_path.unlink(missing_ok=True)
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, 
+                detail="File is empty"
+            )
 
         mime_type = (
             upload_file.content_type 
@@ -55,16 +64,12 @@ class FileService:
             original_name=upload_file.filename or stored_name,
             stored_name=stored_name,
             mime_type=mime_type,
-            size=len(content),
+            size=file_size,
             processing_status="uploaded",
         )
         
-        # Сохраняем в БД через репозиторий
         created_file = await self.file_repo.create(file_item)
-        
-        # Запускаем фоновую задачу Celery
         scan_file_for_threats.delay(created_file.id)
-        
         return created_file
 
     async def update_file(self, file_id: str, title: str) -> StoredFile:

@@ -1,7 +1,7 @@
 from datetime import datetime
 
 from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, JSON, String, func
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
 class Base(DeclarativeBase):
@@ -34,6 +34,11 @@ class StoredFile(Base):
         nullable=False,
     )
 
+    # Связь с алертами (полезно для оптимизации запросов)
+    alerts: Mapped[list["Alert"]] = relationship(
+        "Alert", back_populates="file", cascade="all, delete-orphan"
+    )
+
 
 class Alert(Base):
     __tablename__ = "alerts"
@@ -47,3 +52,6 @@ class Alert(Base):
         server_default=func.now(),
         nullable=False,
     )
+
+    # Обратная связь
+    file: Mapped["StoredFile"] = relationship("StoredFile", back_populates="alerts")

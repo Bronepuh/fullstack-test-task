@@ -1,5 +1,6 @@
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from src.models import StoredFile
 
@@ -8,8 +9,11 @@ class FileRepository:
         self.session = session
 
     async def get_all(self) -> list[StoredFile]:
+        # Оптимизация N+1: сразу подгружаем связанные алерты
         result = await self.session.execute(
-            select(StoredFile).order_by(StoredFile.created_at.desc())
+            select(StoredFile)
+            .options(selectinload(StoredFile.alerts))
+            .order_by(StoredFile.created_at.desc())
         )
         return list(result.scalars().all())
 
