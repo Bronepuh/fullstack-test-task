@@ -4,7 +4,7 @@ from pathlib import Path
 from celery import Celery
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 from src.models import Alert, StoredFile
-from src.service import STORAGE_DIR, DB_URL
+from src.core.config import settings
 
 REDIS_URL = os.environ.get("REDIS_URL", "redis://backend-redis:6379/0")
 _worker_loop: asyncio.AbstractEventLoop | None = None
@@ -19,7 +19,7 @@ def run_in_worker_loop(coroutine):
 
 
 celery_app = Celery("file_tasks", broker=REDIS_URL, backend=REDIS_URL)
-engine = create_async_engine(DB_URL)
+engine = create_async_engine(settings.DB_URL)
 async_session_maker = async_sessionmaker(engine, expire_on_commit=False)
 
 
@@ -56,7 +56,7 @@ async def _extract_file_metadata(file_id: str) -> None:
         if not file_item:
             return
 
-        stored_path = STORAGE_DIR / file_item.stored_name
+        stored_path = settings.STORAGE_DIR / file_item.stored_name
         if not stored_path.exists():
             file_item.processing_status = "failed"
             file_item.scan_status = file_item.scan_status or "failed"
